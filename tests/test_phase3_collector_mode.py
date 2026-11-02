@@ -315,9 +315,10 @@ def test_metrics_requests_beyond_the_concurrency_cap_get_503(monkeypatch):
     import urllib.error
     import urllib.request
 
-    monkeypatch.setattr(exporter_module, "_MAX_CONCURRENT_METRICS_REQUESTS", 1)
     lock = threading.Lock()
-    server = exporter_module._start_http_server(0, lock, registry=None, lock_metrics=True)
+    server = exporter_module._start_http_server(
+        0, lock, registry=None, lock_metrics=True, max_concurrent_metrics=1
+    )
     base = f"http://127.0.0.1:{server.server_address[1]}"
     lock.acquire()  # the first /metrics request occupies the only slot while waiting here
     try:
@@ -338,3 +339,18 @@ def test_metrics_requests_beyond_the_concurrency_cap_get_503(monkeypatch):
         first.join(5)
         server.shutdown()
         server.server_close()
+
+
+def test_max_concurrent_metrics_requests_defaults_overrides_and_rejects_zero(monkeypatch):
+    monkeypatch.setenv("TRUENAS_WS_URL", "wss://nas.example/api/current")
+    monkeypatch.setenv("TRUENAS_API_KEY", "secret")
+
+    monkeypatch.delenv("MAX_CONCURRENT_METRICS_REQUESTS", raising=False)
+    assert exporter_module._load_config().max_concurrent_metrics_requests == 4
+
+    monkeypatch.setenv("MAX_CONCURRENT_METRICS_REQUESTS", "2")
+    assert exporter_module._load_config().max_concurrent_metrics_requests == 2
+
+    monkeypatch.setenv("MAX_CONCURRENT_METRICS_REQUESTS", "0")
+    with pytest.raises(ValueError, match="MAX_CONCURRENT_METRICS_REQUESTS"):
+        exporter_module._load_config()

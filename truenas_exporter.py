@@ -1220,6 +1220,7 @@ class Config:
     enable_generic_event_metrics: bool
     dataset_snapshot_fallback_limit: int
     exporter_mode: str
+    max_concurrent_metrics_requests: int = 4
 
 
 # ---------------------------------------------------------------------------
@@ -6719,9 +6720,6 @@ class _QuietHandler(WSGIRequestHandler):
         pass
 
 
-_MAX_CONCURRENT_METRICS_REQUESTS = 4
-
-
 class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     """Serve each request in its own thread.
 
@@ -6746,6 +6744,7 @@ def _start_http_server(
     lock: threading.Lock,
     registry: CollectorRegistry | None = None,
     lock_metrics: bool = True,
+    max_concurrent_metrics: int = 4,
 ) -> WSGIServer:
     """Start a WSGI server exposing /, /metrics and /healthz on *port*.
 
@@ -6761,7 +6760,7 @@ def _start_http_server(
     metrics_app = make_wsgi_app() if registry is None else make_wsgi_app(registry=registry)
     # Bound concurrent /metrics requests: each one may wait on the exporter lock (legacy mode)
     # or open its own API session (collector mode). /healthz is never limited.
-    metrics_slots = threading.BoundedSemaphore(_MAX_CONCURRENT_METRICS_REQUESTS)
+    metrics_slots = threading.BoundedSemaphore(max_concurrent_metrics)
 
     def app(environ: dict[str, Any], start_response: Any) -> list[bytes]:
         path = environ.get("PATH_INFO", "")
@@ -6840,6 +6839,9 @@ def _load_config() -> Config:
     if exporter_mode not in {"legacy", "collector"}:
         raise ValueError("EXPORTER_MODE must be either 'legacy' or 'collector'")
 
+    max_concurrent_metrics_requests = int(os.getenv("MAX_CONCURRENT_METRICS_REQUESTS", "4"))
+    if max_concurrent_metrics_requests < 1:
+        raise ValueError("MAX_CONCURRENT_METRICS_REQUESTS must be at least 1")
     return Config(
         ws_url=ws_url,
         api_key=api_key,
@@ -6870,6 +6872,7 @@ def _load_config() -> Config:
         enable_generic_event_metrics=_bool_env("ENABLE_GENERIC_EVENT_METRICS", "false"),
         dataset_snapshot_fallback_limit=int(os.getenv("DATASET_SNAPSHOT_FALLBACK_LIMIT", "0")),
         exporter_mode=exporter_mode,
+        max_concurrent_metrics_requests=max_concurrent_metrics_requests,
     )
 
 
@@ -6891,12 +6894,18 @@ def main() -> None:
     if config.exporter_mode == "collector":
         registry = CollectorRegistry(auto_describe=True)
         registry.register(TrueNASCollector(exporter))
-        _start_http_server(config.exporter_port, exporter._lock, registry=registry, lock_metrics=False)
+        _start_http_server(
+            config.exporter_port, exporter._lock, registry=registry, lock_metrics=False,
+            max_concurrent_metrics=config.max_concurrent_metrics_requests,
+        )
         exporter._ensure_event_thread()
         while True:
             time.sleep(3600)
     else:
-        _start_http_server(config.exporter_port, exporter._lock)
+        _start_http_server(
+            config.exporter_port, exporter._lock,
+            max_concurrent_metrics=config.max_concurrent_metrics_requests,
+        )
         exporter.run_forever()
 
 
