@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- serve HTTP requests in separate threads so `/healthz` stays responsive while `/metrics` waits for the exporter lock during a long API poll; previously orchestrator liveness probes timed out and restarted the exporter
+
 ### Added
 
 - public release support files: `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, and GitHub Actions CI

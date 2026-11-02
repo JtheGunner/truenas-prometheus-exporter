@@ -249,7 +249,8 @@ from prometheus_client.core import GaugeMetricFamily
 # Suppress *_created timestamp series added by the Python client for Counters/
 # Summaries/Histograms — they add noise without operational value.
 disable_created_metrics()
-from wsgiref.simple_server import WSGIRequestHandler, make_server
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 from websocket import create_connection, WebSocket, WebSocketTimeoutException
 
 
@@ -6718,6 +6719,16 @@ class _QuietHandler(WSGIRequestHandler):
         pass
 
 
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Serve each request in its own thread.
+
+    The stock wsgiref server handles one request at a time. A /metrics request
+    waiting for the exporter lock during a long API poll would then also block
+    /healthz, and orchestrators would kill a healthy exporter.
+    """
+    daemon_threads = True
+
+
 _LANDING_PAGE = b"""\
 <html><head><title>TrueNAS Exporter</title></head><body>
 <h1>TrueNAS Exporter</h1>
@@ -6732,7 +6743,7 @@ def _start_http_server(
     lock: threading.Lock,
     registry: CollectorRegistry | None = None,
     lock_metrics: bool = True,
-) -> None:
+) -> WSGIServer:
     """Start a WSGI server exposing /, /metrics and /healthz on *port*.
 
     The standard prometheus_client.start_http_server() only exposes /metrics.
@@ -6760,10 +6771,11 @@ def _start_http_server(
                 return metrics_app(environ, start_response)
         return metrics_app(environ, start_response)
 
-    server = make_server("", port, app, handler_class=_QuietHandler)
+    server = make_server("", port, app, server_class=_ThreadingWSGIServer, handler_class=_QuietHandler)
     thread = threading.Thread(target=server.serve_forever, name="http-server", daemon=True)
     thread.start()
     LOG.info("HTTP server started on :%d (GET /, GET /metrics, GET /healthz)", port)
+    return server
 
 
 # ---------------------------------------------------------------------------

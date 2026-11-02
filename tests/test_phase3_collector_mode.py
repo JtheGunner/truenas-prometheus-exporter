@@ -235,7 +235,7 @@ def _capture_http_stack(monkeypatch):
         def serve_forever(self):
             return
 
-    def fake_make_server(host, port, app, handler_class):
+    def fake_make_server(host, port, app, server_class, handler_class):
         captured["http_app"] = app
         return FakeServer()
 
@@ -281,3 +281,28 @@ def test_start_http_server_collector_uses_custom_registry_without_lock(monkeypat
     assert body == [b"metrics\n"]
     assert status_codes and status_codes[0] == "200 OK"
     assert lock.enter_count == 0
+
+
+def test_healthz_is_served_while_metrics_waits_for_the_exporter_lock():
+    import threading
+    import urllib.request
+
+    lock = threading.Lock()
+    server = exporter_module._start_http_server(0, lock, registry=None, lock_metrics=True)
+    port = server.server_address[1]
+    lock.acquire()  # simulates a long API poll holding the lock
+    try:
+        metrics_thread = threading.Thread(
+            target=lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=10).read(),
+            daemon=True,
+        )
+        metrics_thread.start()
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:
+            assert response.status == 200
+            assert response.read() == b"ok\n"
+        assert metrics_thread.is_alive()
+    finally:
+        lock.release()
+        server.shutdown()
+        server.server_close()
