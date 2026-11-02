@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - serve HTTP requests in separate threads so `/healthz` stays responsive while `/metrics` waits for the exporter lock during a long API poll; previously orchestrator liveness probes timed out and restarted the exporter
+- cap concurrent `/metrics` requests (4) and answer further ones with `503`, so waiting scrapes cannot pile up threads
 
 ### Added
 

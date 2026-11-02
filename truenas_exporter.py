@@ -6719,6 +6719,9 @@ class _QuietHandler(WSGIRequestHandler):
         pass
 
 
+_MAX_CONCURRENT_METRICS_REQUESTS = 4
+
+
 class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     """Serve each request in its own thread.
 
@@ -6756,6 +6759,9 @@ def _start_http_server(
     merges event snapshots.
     """
     metrics_app = make_wsgi_app() if registry is None else make_wsgi_app(registry=registry)
+    # Bound concurrent /metrics requests: each one may wait on the exporter lock (legacy mode)
+    # or open its own API session (collector mode). /healthz is never limited.
+    metrics_slots = threading.BoundedSemaphore(_MAX_CONCURRENT_METRICS_REQUESTS)
 
     def app(environ: dict[str, Any], start_response: Any) -> list[bytes]:
         path = environ.get("PATH_INFO", "")
@@ -6765,11 +6771,17 @@ def _start_http_server(
         if path == "/healthz":
             start_response("200 OK", [("Content-Type", "text/plain; charset=utf-8")])
             return [b"ok\n"]
-        if lock_metrics:
-            # Acquire the exporter lock so /metrics cannot read partially-updated state.
-            with lock:
-                return metrics_app(environ, start_response)
-        return metrics_app(environ, start_response)
+        if not metrics_slots.acquire(blocking=False):
+            start_response("503 Service Unavailable", [("Content-Type", "text/plain; charset=utf-8")])
+            return [b"too many concurrent /metrics requests\n"]
+        try:
+            if lock_metrics:
+                # Acquire the exporter lock so /metrics cannot read partially-updated state.
+                with lock:
+                    return metrics_app(environ, start_response)
+            return metrics_app(environ, start_response)
+        finally:
+            metrics_slots.release()
 
     server = make_server("", port, app, server_class=_ThreadingWSGIServer, handler_class=_QuietHandler)
     thread = threading.Thread(target=server.serve_forever, name="http-server", daemon=True)

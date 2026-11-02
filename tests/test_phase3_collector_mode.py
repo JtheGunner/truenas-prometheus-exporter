@@ -1,3 +1,4 @@
+import pytest
 import truenas_exporter as exporter_module
 
 
@@ -304,5 +305,36 @@ def test_healthz_is_served_while_metrics_waits_for_the_exporter_lock():
         assert metrics_thread.is_alive()
     finally:
         lock.release()
+        server.shutdown()
+        server.server_close()
+
+
+def test_metrics_requests_beyond_the_concurrency_cap_get_503(monkeypatch):
+    import threading
+    import time
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setattr(exporter_module, "_MAX_CONCURRENT_METRICS_REQUESTS", 1)
+    lock = threading.Lock()
+    server = exporter_module._start_http_server(0, lock, registry=None, lock_metrics=True)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    lock.acquire()  # the first /metrics request occupies the only slot while waiting here
+    try:
+        first = threading.Thread(
+            target=lambda: urllib.request.urlopen(f"{base}/metrics", timeout=10).read(), daemon=True
+        )
+        first.start()
+        time.sleep(0.3)
+
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(f"{base}/metrics", timeout=2)
+        assert excinfo.value.code == 503
+
+        with urllib.request.urlopen(f"{base}/healthz", timeout=2) as response:
+            assert response.status == 200
+    finally:
+        lock.release()
+        first.join(5)
         server.shutdown()
         server.server_close()
